@@ -1143,6 +1143,19 @@ class API(ModelView):
         for postprocessor in self.postprocessors['GET_MANY']:
             postprocessor(result=result, search_params=search_params)
 
+        # Provide top-level links with URL templates.
+        links = {}
+        for relation in get_relations(self.model):
+            linkname = '{0}.{1}'.format(self.collection_name, relation)
+            # TODO I don't know how to get the URL for this link so I can't
+            # fill in the URL template here. See issue #274. For now, we'll
+            # just leave it as and empty mapping.
+            #
+            # links[linkname] = url_for(typeof(relation))
+            links[linkname] = None
+        if links:
+            result['links'] = links
+
         # HACK Provide the headers directly in the result dictionary, so that
         # the :func:`jsonpify` function has access to them. See the note there
         # for more information.
