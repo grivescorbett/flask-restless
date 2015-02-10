@@ -1116,22 +1116,7 @@ class API(ModelView):
         result[_HEADERS] = headers
         return result, 200, headers
 
-    def get(self, instid, relationname, relationinstid):
-        """Returns a JSON representation of an instance of model with the
-        specified name.
-
-        If ``instid`` is ``None``, this method returns the result of a search
-        with parameters specified in the query string of the request. If no
-        search parameters are specified, this method returns all instances of
-        the specified model.
-
-        If ``instid`` is an integer, this method returns the instance of the
-        model with that identifying integer. If no such instance exists, this
-        method responds with :http:status:`404`.
-
-        """
-        if instid is None:
-            return self._search()
+    def _get_single(self, instid, relationname=None, relationinstid=None):
         for preprocessor in self.preprocessors['GET_SINGLE']:
             temp_result = preprocessor(instance_id=instid)
             # Let the return value of the preprocessor be the new value of
@@ -1173,7 +1158,39 @@ class API(ModelView):
             return {_STATUS: 404}, 404
         for postprocessor in self.postprocessors['GET_SINGLE']:
             postprocessor(result=result)
-        return result
+        return result, 200
+
+    # TODO Much of this function is going to be a repeat of the code from get()
+    def _get_many(self, *ids):
+        # Each call to _get_single return a two-tuple whose left element is the
+        # dictionary to be converted into JSON and whose right element is the
+        # status code.
+        result = [self._get_single(instid) for instid in ids]
+        # If any of the instances was not found, return a 404 for the whole
+        # request.
+        if any(status == 404 for data, status in result):
+            return {_STATUS: 404}, 404
+        return dict(objects=[data for data, status in result]), 200
+
+    def get(self, instid, relationname, relationinstid):
+        """Returns a JSON representation of an instance of model with the
+        specified name.
+
+        If ``instid`` is ``None``, this method returns the result of a search
+        with parameters specified in the query string of the request. If no
+        search parameters are specified, this method returns all instances of
+        the specified model.
+
+        If ``instid`` is an integer, this method returns the instance of the
+        model with that identifying integer. If no such instance exists, this
+        method responds with :http:status:`404`.
+
+        """
+        if instid is None:
+            return self._search()
+        if ',' in instid:
+            return self._get_many(*(instid.split(',')))
+        return self._get_single(instid, relationname, relationinstid)
 
     def _delete_many(self):
         """Deletes multiple instances of the model.

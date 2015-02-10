@@ -233,6 +233,18 @@ def primary_key_name(model_or_instance):
     return 'id' if 'id' in pk_names else pk_names[0]
 
 
+def primary_key_value(instance):
+    """Returns the value of the primary key field of the specified `instance`
+    of a SQLAlchemy model.
+
+    This is a convenience function for::
+
+        getattr(instance, primary_key_name(instance))
+
+    """
+    return getattr(instance, primary_key_name(instance))
+
+
 def is_like_list(instance, relation):
     """Returns ``True`` if and only if the relation of `instance` whose name is
     `relation` is list-like.
@@ -350,42 +362,50 @@ def to_dict(instance, deep=None, exclude=None, include=None,
             result[key] = str(value)
         elif key not in column_attrs and is_mapped_class(type(value)):
             result[key] = to_dict(value)
+    # In order to comply with the JSON API standard, primary keys must be
+    # returned to the client as strings, so we convert it here.
+    if 'id' in result:
+        result['id'] = str(result['id'])
     # recursively call _to_dict on each of the `deep` relations
     deep = deep or {}
+    # If there are relations to convert to dictionary form, put them into a
+    # special `links` key as required by JSON API.
+    if deep:
+        result['links'] = {}
     for relation, rdeep in deep.items():
         # Get the related value so we can see if it is None, a list, a query
         # (as specified by a dynamic relationship loader), or an actual
         # instance of a model.
         relatedvalue = getattr(instance, relation)
         if relatedvalue is None:
-            result[relation] = None
+            result['links'][relation] = None
             continue
-        # Determine the included and excluded fields for the related model.
-        newexclude = None
-        newinclude = None
-        if exclude_relations is not None and relation in exclude_relations:
-            newexclude = exclude_relations[relation]
-        elif (include_relations is not None and
-              relation in include_relations):
-            newinclude = include_relations[relation]
-        # Determine the included methods for the related model.
-        newmethods = None
-        if include_methods is not None:
-            newmethods = [method.split('.', 1)[1] for method in include_methods
-                          if method.split('.', 1)[0] == relation]
+
+        # # Determine the included and excluded fields for the related model.
+        # newexclude = None
+        # newinclude = None
+        # if exclude_relations is not None and relation in exclude_relations:
+        #     newexclude = exclude_relations[relation]
+        # elif (include_relations is not None and
+        #       relation in include_relations):
+        #     newinclude = include_relations[relation]
+        # # Determine the included methods for the related model.
+        # newmethods = None
+        # if include_methods is not None:
+        #     newmethods = [method.split('.', 1)[1] for method in include_methods
+        #                   if method.split('.', 1)[0] == relation]
+
+        # If the related value is list-like, return a list of primary key
+        # values.
         if is_like_list(instance, relation):
-            result[relation] = [to_dict(inst, rdeep, exclude=newexclude,
-                                        include=newinclude,
-                                        include_methods=newmethods)
-                                for inst in relatedvalue]
+            result['links'][relation] = [str(primary_key_value(inst))
+                                         for inst in relatedvalue]
             continue
         # If the related value is dynamically loaded, resolve the query to get
         # the single instance.
         if isinstance(relatedvalue, Query):
             relatedvalue = relatedvalue.one()
-        result[relation] = to_dict(relatedvalue, rdeep, exclude=newexclude,
-                                   include=newinclude,
-                                   include_methods=newmethods)
+        result['links'][relation] = str(primary_key_value(relatedvalue))
     return result
 
 

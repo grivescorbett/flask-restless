@@ -327,8 +327,8 @@ class TestJsonAPI(TestSupport):
         data = loads(response.data)
         assert data['id'] == '1'
         assert data['name'] == 'foo'
-        computers = data['links']['computers']
-        assert sorted(['1', '2']) == sorted(c.id for c in computers)
+        computerids = data['links']['computers']
+        assert sorted(['1', '2']) == sorted(computerids)
 
         # A person without any computers should have an empty list there.
         response = self.app.get('/api/person/2')
