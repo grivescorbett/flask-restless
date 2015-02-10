@@ -26,6 +26,7 @@ from __future__ import division
 
 from collections import defaultdict
 from functools import wraps
+from itertools import chain
 import math
 import warnings
 
@@ -58,6 +59,7 @@ from .helpers import has_field
 from .helpers import is_like_list
 from .helpers import partition
 from .helpers import primary_key_name
+from .helpers import primary_key_value
 from .helpers import query_by_primary_key
 from .helpers import session_query
 from .helpers import strings_to_dates
@@ -78,6 +80,11 @@ _HEADERS = '__restless_headers'
 #: information from view functions to the :func:`jsonpify` function.
 _STATUS = '__restless_status_code'
 
+#: The Content-Type we expect for most requests to APIs.
+CONTENT_TYPE = 'application/vnd.api+json'
+
+# For the sake of brevity, rename this function.
+chain = chain.from_iterable
 
 class ProcessingException(HTTPException):
     """Raised when a preprocessor or postprocessor encounters a problem.
@@ -481,7 +488,7 @@ class API(ModelView):
     #: List of decorators applied to every method of this class.
     decorators = ModelView.decorators + [catch_processing_exceptions]
 
-    def __init__(self, session, model, exclude_columns=None,
+    def __init__(self, session, model, collection_name, exclude_columns=None,
                  include_columns=None, include_methods=None,
                  validation_exceptions=None, results_per_page=10,
                  max_results_per_page=100, post_form_preprocessor=None,
@@ -494,6 +501,9 @@ class API(ModelView):
 
         `model` is the SQLAlchemy model class for which this instance of the
         class is an API. This model should live in `database`.
+
+        `collection_name` is a string by which a collection of instances of
+        `model` are presented to the user.
 
         `validation_exceptions` is the tuple of exceptions raised by backend
         validation (if any exist). If exceptions are specified here, any
@@ -618,6 +628,7 @@ class API(ModelView):
             self.include_columns, self.include_relations = _parse_includes(
                 [self._get_column_name(column) for column in include_columns])
         self.include_methods = include_methods
+        self.collection_name = collection_name
         self.validation_exceptions = tuple(validation_exceptions or ())
         self.results_per_page = results_per_page
         self.max_results_per_page = max_results_per_page
@@ -964,10 +975,19 @@ class API(ModelView):
             relations &= (cols | rels)
         elif self.exclude_columns is not None:
             relations -= frozenset(self.exclude_columns)
+        # Check if the client requested only a specified subset of columns to
+        # be included.
+        fields = request.args.get('fields', None)
+        if fields is not None:
+            fields = includes.split(',')
+        if fields is None and self.include_columns is None:
+            includes = None
+        else:
+            includes = fields + (self.include_columns or [])
         deep = dict((r, {}) for r in relations)
         return to_dict(inst, deep, exclude=self.exclude_columns,
                        exclude_relations=self.exclude_relations,
-                       include=self.include_columns,
+                       include=includes,
                        include_relations=self.include_relations,
                        include_methods=self.include_methods)
 
@@ -1085,27 +1105,33 @@ class API(ModelView):
 
         # for security purposes, don't transmit list as top-level JSON
         if isinstance(result, Query):
-            result = self._paginated(result, deep)
-            # Create the Link header.
+            # TODO disabling pagination for now to ease transition to JSON API
+            # compliance.
             #
-            # TODO We are already calling self._compute_results_per_page() once
-            # in _paginated(); don't compute it again here.
-            page = result['meta']['page']
-            last_page = result['meta']['total_pages']
-            linkstring = create_link_string(page, last_page,
-                                            self._compute_results_per_page())
-            headers = dict(Link=linkstring)
+            # result = self._paginated(result, deep)
+            #
+            # # Create the Link header.
+            # #
+            # # TODO We are already calling self._compute_results_per_page() once
+            # # in _paginated(); don't compute it again here.
+            # page = result['meta']['page']
+            # last_page = result['meta']['total_pages']
+            # linkstring = create_link_string(page, last_page,
+            #                                 self._compute_results_per_page())
+            # headers = dict(Link=linkstring)
+            result = [self._inst_to_dict(instance) for instance in result]
+            headers = dict()
         else:
             primary_key = self.primary_key or primary_key_name(result)
-            result = to_dict(result, deep, exclude=self.exclude_columns,
-                             exclude_relations=self.exclude_relations,
-                             include=self.include_columns,
-                             include_relations=self.include_relations,
-                             include_methods=self.include_methods)
+            result = self._inst_to_dict(result)
             # The URL at which a client can access the instance matching this
             # search query.
             url = '{0}/{1}'.format(request.base_url, result[primary_key])
             headers = dict(Location=url)
+
+        # Wrap the resulting object or list of objects in an object with a
+        # mapping from the collection name to the object or list of objects.
+        result = {self.collection_name: result}
 
         for postprocessor in self.postprocessors['GET_MANY']:
             postprocessor(result=result, search_params=search_params)
@@ -1113,7 +1139,8 @@ class API(ModelView):
         # HACK Provide the headers directly in the result dictionary, so that
         # the :func:`jsonpify` function has access to them. See the note there
         # for more information.
-        result[_HEADERS] = headers
+        result['meta'] = {}
+        result['meta'][_HEADERS] = headers
         return result, 200, headers
 
     def _get_single(self, instid, relationname=None, relationinstid=None):
@@ -1151,26 +1178,79 @@ class API(ModelView):
             else:
                 # for security purposes, don't transmit list as top-level JSON
                 if is_like_list(instance, relationname):
-                    result = self._paginated(list(related_value), deep)
+                    # TODO Disabled pagination for now in order to ease
+                    # transition into JSON API compliance.
+                    #
+                    # result = self._paginated(list(related_value), deep)
+                    result = [to_dict(instance) for instance in related_value]
                 else:
                     result = to_dict(related_value, deep)
         if result is None:
             return {_STATUS: 404}, 404
+        # Wrap the resulting object or list of objects in an object with a
+        # mapping from the collection name to the object or list of objects.
+        #
+        # Store the original data in a variable for easier access.
+        original = result
+        if relationname is not None:
+            # TODO I don't know the collection name for the linked objects, so
+            # I can't provide a correctly named mapping here.
+            #
+            # result = {collection_name(relationname): result}
+            result = {relationname: result}
+        else:
+            result = {self.collection_name: result}
+        # Add any links requested to be included by URL parameters.
+        toinclude = request.args.get('include', None)
+        if toinclude is not None:
+            toinclude = toinclude.split(',')
+            result['links'] = {}
+            result['linked'] = {}
+            ids_to_link = defaultdict(list)
+            for link in toinclude:
+                linkname = '{0}.{1}'.format(self.collection_name, link)
+                # TODO I don't know how to get the URL for this link so I can't
+                # fill in the URL template here. See issue #274. For now, we'll
+                # just leave it as and empty mapping.
+                #
+                # result['links'][linkname] = url_for(typeof(link))
+                result['links'][linkname] = None
+                # If there is a list of instances, collect all the linked IDs
+                # of the appropriate type.
+                #
+                # Otherwise, if there is just a single instance, look through
+                # the links to get the IDs of the linked instances.
+                if isinstance(original, list):
+                    link_ids = chain(list(d['links'][link])
+                                     for d in original['objects'])
+                else:
+                    link_ids = list(original['links'][link])
+                ids_to_link[link].extend(link_ids)
+            for link, linkids in ids_to_link.items():
+                related_model = get_related_model(self.model, link)
+                related_instances = (get_by(self.session, related_model,
+                                            link_id) for link_id in linkids)
+                # TODO I don't know the collection name for the linked objects,
+                # so I can't provide a correctly named mapping here.
+                #
+                # result['linked'][collection_name(link)] = ...
+                result['linked'][link] = [to_dict(instance)
+                                          for instance in related_instances]
         for postprocessor in self.postprocessors['GET_SINGLE']:
             postprocessor(result=result)
         return result, 200
 
-    # TODO Much of this function is going to be a repeat of the code from get()
     def _get_many(self, *ids):
-        # Each call to _get_single return a two-tuple whose left element is the
-        # dictionary to be converted into JSON and whose right element is the
-        # status code.
+        # Each call to _get_single returns a two-tuple whose left element is
+        # the dictionary to be converted into JSON and whose right element is
+        # the status code.
         result = [self._get_single(instid) for instid in ids]
         # If any of the instances was not found, return a 404 for the whole
         # request.
         if any(status == 404 for data, status in result):
             return {_STATUS: 404}, 404
-        return dict(objects=[data for data, status in result]), 200
+        # Wrap the collection with the collection name.
+        return {self.collection_name: [data for data, status in result]}, 200
 
     def get(self, instid, relationname, relationinstid):
         """Returns a JSON representation of an instance of model with the
@@ -1306,6 +1386,41 @@ class API(ModelView):
             postprocessor(was_deleted=was_deleted)
         return {}, 204 if was_deleted else 404
 
+    def _create_single(self, data):
+        # Getting the list of relations that will be added later
+        cols = get_columns(self.model)
+        relations = set(get_relations(self.model))
+        # Looking for what we're going to set on the model right now
+        colkeys = set(cols.keys())
+        fields = set(data.keys())
+        props = (colkeys & fields) - relations
+        # Instantiate the model with the parameters.
+        modelargs = dict([(i, data[i]) for i in props])
+        instance = self.model(**modelargs)
+        # Handling relations, a single level is allowed
+        for col in relations & fields:
+            submodel = get_related_model(self.model, col)
+
+            if type(data[col]) == list:
+                # model has several related objects
+                for subparams in data[col]:
+                    subinst = get_or_create(self.session, submodel,
+                                            subparams)
+                    try:
+                        getattr(instance, col).append(subinst)
+                    except AttributeError:
+                        attribute = getattr(instance, col)
+                        attribute[subinst.key] = subinst.value
+            else:
+                # model has single related object
+                subinst = get_or_create(self.session, submodel,
+                                        data[col])
+                setattr(instance, col, subinst)
+
+        # add the created model to the session
+        self.session.add(instance)
+        return instance
+
     def post(self):
         """Creates a new instance of a given model based on request data.
 
@@ -1327,14 +1442,15 @@ class API(ModelView):
 
         """
         content_type = request.headers.get('Content-Type', None)
-        content_is_json = content_type.startswith('application/json')
+        content_is_json = content_type.startswith(CONTENT_TYPE)
         is_msie = _is_msie8or9()
-        # Request must have the Content-Type: application/json header, unless
-        # the User-Agent string indicates that the client is Microsoft Internet
-        # Explorer 8 or 9 (which has a fixed Content-Type of 'text/html'; see
-        # issue #267).
+        # Request must have the Content-Type: application/vnd.api+json header,
+        # unless the User-Agent string indicates that the client is Microsoft
+        # Internet Explorer 8 or 9 (which has a fixed Content-Type of
+        # 'text/html'; see issue #267).
         if not is_msie and not content_is_json:
-            msg = 'Request must have "Content-Type: application/json" header'
+            msg = ('Request must have "Content-Type: {0}"'
+                   ' header').format(CONTENT_TYPE)
             return dict(message=msg), 415
 
         # try to read the parameters for the model from the body of the request
@@ -1344,6 +1460,10 @@ class API(ModelView):
             if is_msie:
                 data = json.loads(request.get_data()) or {}
             else:
+                # This doesn't work in versions of Flask less than 1.0 because
+                # in those versions, get_json() only works if the request
+                # content type is application/json; we require the content type
+                # specified in :data:`CONTENT_TYPE`.
                 data = request.get_json() or {}
         except (BadRequest, TypeError, ValueError, OverflowError) as exception:
             current_app.logger.exception(str(exception))
@@ -1353,77 +1473,64 @@ class API(ModelView):
         for preprocessor in self.preprocessors['POST']:
             preprocessor(data=data)
 
+        # Unwrap the data from the collection name key.
+        data = data[self.collection_name]
         # Check for any request parameter naming a column which does not exist
         # on the current model.
-        for field in data:
+        #
+        # Incoming data could be a list or a single resource representation.
+        fields = set(chain(data)) if isinstance(data, list) else data.keys()
+        for field in fields:
             if not has_field(self.model, field):
                 msg = "Model does not have field '{0}'".format(field)
                 return dict(message=msg), 400
 
-        # Getting the list of relations that will be added later
-        cols = get_columns(self.model)
-        relations = get_relations(self.model)
-
-        # Looking for what we're going to set on the model right now
-        colkeys = cols.keys()
-        paramkeys = data.keys()
-        props = set(colkeys).intersection(paramkeys).difference(relations)
-
         # Special case: if there are any dates, convert the string form of the
         # date into an instance of the Python ``datetime`` object.
-        data = strings_to_dates(self.model, data)
+        if isinstance(data, list):
+            data = [strings_to_dates(self.model, d) for d in data]
+        else:
+            data = strings_to_dates(self.model, data)
 
         try:
-            # Instantiate the model with the parameters.
-            modelargs = dict([(i, data[i]) for i in props])
-            instance = self.model(**modelargs)
-
-            # Handling relations, a single level is allowed
-            for col in set(relations).intersection(paramkeys):
-                submodel = get_related_model(self.model, col)
-
-                if type(data[col]) == list:
-                    # model has several related objects
-                    for subparams in data[col]:
-                        subinst = get_or_create(self.session, submodel,
-                                                subparams)
-                        try:
-                            getattr(instance, col).append(subinst)
-                        except AttributeError:
-                            attribute = getattr(instance, col)
-                            attribute[subinst.key] = subinst.value
-                else:
-                    # model has single related object
-                    subinst = get_or_create(self.session, submodel,
-                                            data[col])
-                    setattr(instance, col, subinst)
-
-            # add the created model to the session
-            self.session.add(instance)
+            # Make instances a list version of created to facilitate getting
+            # the primary key and creating the Location headers below.
+            if isinstance(data, list):
+                created = [self._create_single(d) for d in data]
+                instances = created
+            else:
+                created = self._create_single(data)
+                instances = [created]
             self.session.commit()
-            # Get the dictionary representation of the new instance.
-            result = self._inst_to_dict(instance)
-            # Determine the value of the primary key for this instance and
-            # encode URL-encode it (in case it is a Unicode string).
-            pk_name = self.primary_key or primary_key_name(instance)
-            primary_key = result[pk_name]
+        except self.validation_exceptions as exception:
+            return self._handle_validation_exception(exception)
+        # Get the dictionary representation of the new instance or instances.
+        result = [self._inst_to_dict(instance) for instance in instances]
+        # Determine the value of the primary key for this instance or instances
+        # and URL-encode it (in case it is a Unicode string).
+        primary_keys = []
+        for instance in instances:
+            primary_key = primary_key_value(instance)
             try:
                 primary_key = str(primary_key)
             except UnicodeEncodeError:
                 primary_key = url_quote_plus(primary_key.encode('utf-8'))
-
-            # The URL at which a client can access the newly created instance
-            # of the model.
-            url = '{0}/{1}'.format(request.base_url, primary_key)
-            # Provide that URL in the Location header in the response.
-            headers = dict(Location=url)
-
-            for postprocessor in self.postprocessors['POST']:
-                postprocessor(result=result)
-
-            return result, 201, headers
-        except self.validation_exceptions as exception:
-            return self._handle_validation_exception(exception)
+            primary_keys.append(primary_key)
+        # The URL at which a client can access the newly created instance
+        # of the model.
+        urls = ['{0}/{1}'.format(request.base_url, k) for k in primary_keys]
+        # Provide that URL in the Location header in the response.
+        headers = (('Location', url) for url in urls)
+        # HACK-ish: Finall, if the original post was for a single resource,
+        # just unwrap it from its list.
+        result = result[0]
+        # Wrap the resulting object or list of objects in an object with a
+        # mapping from the collection name to the object or list of
+        # objects.
+        result = {self.collection_name: result}
+        for postprocessor in self.postprocessors['POST']:
+            postprocessor(result=result)
+        return result, 201, headers
 
     def patch(self, instid, relationname, relationinstid):
         """Updates the instance specified by ``instid`` of the named model, or
@@ -1451,14 +1558,15 @@ class API(ModelView):
 
         """
         content_type = request.headers.get('Content-Type', None)
-        content_is_json = content_type.startswith('application/json')
+        content_is_json = content_type.startswith(CONTENT_TYPE)
         is_msie = _is_msie8or9()
-        # Request must have the Content-Type: application/json header, unless
-        # the User-Agent string indicates that the client is Microsoft Internet
-        # Explorer 8 or 9 (which has a fixed Content-Type of 'text/html'; see
-        # issue #267).
+        # Request must have the Content-Type: application/vnd.api+json header,
+        # unless the User-Agent string indicates that the client is Microsoft
+        # Internet Explorer 8 or 9 (which has a fixed Content-Type of
+        # 'text/html'; see issue #267).
         if not is_msie and not content_is_json:
-            msg = 'Request must have "Content-Type: application/json" header'
+            msg = ('Request must have "Content-Type: {0}"'
+                   ' header').format(CONTENT_TYPE)
             return dict(message=msg), 415
 
         # try to load the fields/values to update from the body of the request

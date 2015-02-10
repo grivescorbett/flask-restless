@@ -502,11 +502,11 @@ class APIManager(object):
             postprocessors_[key] = value + postprocessors_[key]
         # the view function for the API for this model
         api_view = API.as_view(apiname, restlessinfo.session, model,
-                               exclude_columns, include_columns,
-                               include_methods, validation_exceptions,
-                               results_per_page, max_results_per_page,
-                               post_form_preprocessor, preprocessors_,
-                               postprocessors_, primary_key)
+                               collection_name, exclude_columns,
+                               include_columns, include_methods,
+                               validation_exceptions, results_per_page,
+                               max_results_per_page, post_form_preprocessor,
+                               preprocessors_, postprocessors_, primary_key)
         # suffix an integer to apiname according to already existing blueprints
         blueprintname = APIManager._next_blueprint_name(app.blueprints,
                                                         apiname)
