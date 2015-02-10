@@ -290,6 +290,620 @@ class TestFunctionAPI(TestSupportPrefilled):
         # TODO What other headers should the metadata include?
 
 
+class TestJsonAPI(TestSupport):
+
+    def setUp(self):
+        """Creates the database, the :class:`~flask.Flask` object, the
+        :class:`~flask_restless.manager.APIManager` for that application, and
+        creates the ReSTful API endpoints for the :class:`testapp.Person` and
+        :class:`testapp.Computer` models.
+
+        """
+        # create the database
+        super(TestJsonAPI, self).setUp()
+
+        # setup the URLs for the Person and Computer API
+        self.manager.create_api(self.Person,
+                                methods=['GET', 'PATCH', 'POST', 'DELETE'])
+        self.manager.create_api(self.Computer,
+                                methods=['GET', 'POST', 'PATCH'])
+
+    def test_get(self):
+        # Create a person object with multiple computers.
+        person1 = self.Person(id=1, name='foo')
+        person2 = self.Person(id=2, name='bar')
+        computer1 = self.Computer(id=1)
+        computer2 = self.Computer(id=2)
+        computer3 = self.Computer(id=3)
+        person1.computers = [computer1, computer2]
+        self.session.add_all([person1, person2])
+        self.session.add_all([computer1, computer2, computer3])
+        self.session.commit()
+
+        # Get the person and ensure all its data and one-to-many links are
+        # available.
+        response = self.app.get('/api/person/1')
+        assert response.status_code == 200
+        data = loads(response.data)
+        assert data['id'] == '1'
+        assert data['name'] == 'foo'
+        computers = data['links']['computers']
+        assert sorted(['1', '2']) == sorted(c.id for c in computers)
+
+        # A person without any computers should have an empty list there.
+        response = self.app.get('/api/person/2')
+        assert response.status_code == 200
+        data = loads(response.data)
+        assert data['id'] == '2'
+        assert data['name'] == 'bar'
+        assert [] == data['links']['computers']
+
+        # Get one of the computers and ensure that its many-to-one link is the
+        # ID of the person that owns it.
+        response = self.app.get('/api/computer/1')
+        assert response.status_code == 200
+        data = loads(response.data)
+        assert data['id'] == '1'
+        ownerid = data['links']['owner']
+        assert '1' == ownerid
+
+        # A computer without an owner should have a null value there.
+        response = self.app.get('/api/computer/3')
+        assert response.status_code == 200
+        data = loads(response.data)
+        assert data['id'] == '3'
+        ownerid = data['links']['owner']
+        assert None == ownerid
+
+    def test_top_level_links(self):
+        # Create a person object with multiple computers.
+        person = self.Person(id=1, name='foo')
+        computer1 = self.Computer(id=1)
+        computer2 = self.Computer(id=2)
+        person.computers = [computer1, computer2]
+        self.session.add_all([person, computer1, computer2])
+        self.session.commit()
+
+        # Check that the top-level document provides a link template to the
+        # links to the one-to-many relationships.
+        response = self.app.get('/api/person')
+        assert response.status_code == 200
+        data = loads(response.data)
+        # TODO Need to also test for `people.computers` if the collection name
+        # is specified by the user in `create_api()`.
+        template = data['links']['person.computers']
+        assert template.endswith('/api/person/{person.computers}')
+        # TODO Test for compound documents.
+
+    def test_get_multiple_with_commas(self):
+        person1 = self.Person(id=1)
+        person2 = self.Person(id=2)
+        self.session.add_all([person1, person2])
+        self.session.commit()
+
+        response = self.app.get('/api/person/1,2')
+        assert response.status_code == 200
+        data = loads(response.data)
+        assert sorted(['1', '2']) == sorted(p['id'] for p in data['objects'])
+
+    def test_get_relationships(self):
+        # Create a person object with multiple computers.
+        person = self.Person(id=1, name='foo')
+        computer1 = self.Computer(id=1)
+        computer2 = self.Computer(id=2)
+        person.computers = [computer1, computer2]
+        self.session.add_all([person, computer1, computer2])
+        self.session.commit()
+
+        # Test for getting a one-to-many relationship.
+        response = self.app.get('/api/person/1/links/computers')
+        assert response.status_code == 200
+        data = loads(response.data)
+        assert sorted(['1', '2']) == sorted(c['id'] for c in data['objects'])
+
+        # Test for getting a many-to-one relationship.
+        response = self.app.get('/api/computer/1/links/owner')
+        assert response.status_code == 200
+        data = loads(response.data)
+        assert data['id'] == 1
+        response = self.app.get('/api/computer/2/links/owner')
+        assert response.status_code == 200
+        data = loads(response.data)
+        assert data['id'] == 1
+
+    def test_inclusion(self):
+        # Create a person object with multiple computers.
+        person = self.Person(id=1, name='foo')
+        computer1 = self.Computer(id=1)
+        computer2 = self.Computer(id=2)
+        person.computers = [computer1, computer2]
+        self.session.add_all([person, computer1, computer2])
+        self.session.commit()
+
+        # Ask for computers to be included in a compound document.
+        response = self.app.get('/api/person/1?include=computers')
+        assert response.status_code == 200
+        data = loads(response.data)
+        link = data['links']['person.computers']
+        assert link['type'] == 'computer'
+        assert link['href'].endswith('/api/computer/{person.computers}')
+        linked = data['linked']['computers']
+        assert sorted(['1', '2']) == sorted(c['id'] for c in linked)
+
+    def test_sparse_fieldsets(self):
+        # Create a person object with multiple computers.
+        person1 = self.Person(id=1, name='foo', age=99, other=123)
+        person2 = self.Person(id=2, name='bar', age=10, other=456)
+        computer1 = self.Computer(id=1, name='baz')
+        computer2 = self.Computer(id=2, name='xyzzy')
+        person1.computers = [computer1, computer2]
+        self.session.add_all([person1, person2, computer1, computer2])
+        self.session.commit()
+
+        # Get people but only include some of the fields.
+        response = self.app.get('/api/person?fields=id,name,age')
+        assert response.status_code == 200
+        data = loads(response.data)
+        for person in data['objects']:
+            assert 'id' in person
+            assert 'name' in person
+            assert 'age' in person
+            assert 'other' not in person
+            assert 'computers' not in person
+        # TODO test the alternate, more complicated sparse field syntax
+
+    def test_sort(self):
+        # Create a person object with multiple computers.
+        person1 = self.Person(id=1, name='foo', age=99)
+        person2 = self.Person(id=2, name='bar', age=99)
+        person3 = self.Person(id=3, name='foo', age=80)
+        person4 = self.Person(id=4, name='xyzzy', age=80)
+        self.session.add_all([person1, person2, person3, person4])
+        self.session.commit()
+
+        # Test sorting by age.
+        response = self.app.get('/api/person/1,3?sort=age')
+        assert response.status_code == 200
+        p1, p3 = loads(response.data)['objects']
+        assert p1.age < p3.age
+
+        # Test sorting in reverse order.
+        response = self.app.get('/api/person/1,3?sort=-age')
+        assert response.status_code == 200
+        p1, p3 = loads(response.data)['objects']
+        assert p1.age > p3.age
+
+        # Test sorting by multiple fields.
+        response = self.app.get('/api/person?sort=-age,name')
+        assert response.status_code == 200
+        p1, p2, p3, p4 = loads(response.data)['objects']
+        assert p1.age == p2.age > p3.age == p4.age
+        assert p1.name <= p2.name
+        assert p3.name <= p4.name
+        # TODO test the more complicated sorting syntax
+
+    def test_post(self):
+        data = dict(person=dict(id=1, name='foo', age=10))
+        response = self.app.post('/api/person', data=dumps(data))
+        assert response.status_code == 201
+        person = loads(response.data)
+        assert person['id'] == '1'
+        assert person['name'] == 'foo'
+        assert person['age'] == '10'
+        # The server must respond with a Location header.
+        assert response.headers['Location'].endswith('/api/person/1')
+
+    def test_post_multiple(self):
+        data = dict(person=[dict(name='foo', age=10), dict(name='bar')])
+        response = self.app.post('/api/person', data=dumps(data))
+        assert response.status_code == 201
+        people = loads(response.data)['objects']
+        assert sorted(['foo', 'bar']) == sorted(p.name for name in people)
+        # The server must respond with a Location header for each person.
+        #
+        # Sort the locations by primary key, which is the last character in the
+        # Location URL.
+        locations = sorted(response.headers['Location'], key=lambda s: s[-1])
+        assert locations[0].endswith('/api/person/1')
+        assert locations[1].endswith('/api/person/2')
+
+    def test_put(self):
+        person = self.Person(id=1, name='foo')
+        self.session.add(person)
+        self.session.commit()
+        # Update the person by changing its name.
+        data = dict(person=dict(name='bar'))
+        response = self.app.put('/api/person/1', data=dumps(data))
+        assert response.status_code == 204
+
+    def test_put_other_modifications(self):
+        person = self.Person(id=1, name='foo')
+        self.session.add(person)
+        self.session.commit()
+        # Updates that make other modifications, should respond with 200
+        # instead of 204 and include a representation of the resource.
+        #
+        # TODO can't currently test this. Maybe need to allow a postprocessor
+        # to modify an `updated_at` field on the model or something?
+        #
+        # data = dict(person=dict(name='bar'))
+        # response = self.app.put('/api/person/1', data=dumps(data))
+        # assert response.status_code == 204
+        # data = loads(response.data)
+        # assert data['name'] == 'bar'
+        # assert data['updated_at'] == ...
+
+    def test_put_multiple(self):
+        person1 = self.Person(id=1, name='foo')
+        person2 = self.Person(id=2, age=99)
+        self.session.add_all([person1, person2])
+        self.session.commit()
+
+        # Updates a different field on each person.
+        data = dict(person=[dict(id=1, name='bar'), dict(id=2, age=10)])
+        response = self.app.put('/api/person/1,2', data=dumps(data))
+        assert response.status_code == 204
+        assert person1.name == 'bar'
+        assert person2.age == 10
+
+    def test_put_multiple_without_id(self):
+        person1 = self.Person(id=1, name='foo')
+        person2 = self.Person(id=2, age=99)
+        self.session.add_all([person1, person2])
+        self.session.commit()
+
+        # In order to avoid ambiguity, attempts to update multiple instances
+        # without specifying the ID in each object results in an error.
+        data = dict(person=[dict(name='bar'), dict(id=2, age=10)])
+        response = self.app.put('/api/person/1,2', data=dumps(data))
+        assert response.status_code == 400
+        # TODO Check the error message, description, etc.
+
+    def test_put_many_to_one(self):
+        person1 = self.Person(id=1)
+        person2 = self.Person(id=2)
+        computer = self.Computer(id=1)
+        person1.computers = [computer]
+        self.session.add_all([person1, person2, computer])
+        self.session.commit()
+
+        # Change the owner of the computer from person 1 to person 2.
+        data = dict(computer=dict(links=dict(owner='2')))
+        response = self.app.put('/api/computer/1', data=dumps(data))
+        assert response.status_code == 204
+        assert computer.owner is person2
+
+    def test_put_remove_many_to_one(self):
+        person = self.Person(id=1)
+        computer = self.Computer(id=1)
+        person.computers = [computer]
+        self.session.add_all([person, computer])
+        self.session.commit()
+
+        # Change the owner of the computer to None.
+        data = dict(computer=dict(links=dict(owner=None)))
+        response = self.app.put('/api/computer/1', data=dumps(data))
+        assert response.status_code == 204
+        assert person.computers == []
+
+    def test_put_relationship_url(self):
+        person1 = self.Person(id=1)
+        person2 = self.Person(id=2)
+        computer = self.Computer(id=1)
+        person1.computers = [computer]
+        self.session.add_all([person1, person2, computer])
+        self.session.commit()
+
+        # Change the owner of the computer from person 1 to person 2.
+        data = dict(person='2')
+        response = self.app.put('/api/computer/1/links/owner',
+                                data=dumps(data))
+        assert response.status_code == 204
+        assert computer.owner is person2
+
+    def test_put_to_one_nonexistent(self):
+        person = self.Person(id=1)
+        computer = self.Computer(id=1)
+        self.session.add_all([person, computer])
+        self.session.commit()
+
+        # Set the owner of the computer to be the person with ID 1.
+        data = dict(person='1')
+        response = self.app.put('/api/computer/1/links/owner',
+                                data=dumps(data))
+        assert response.status_code == 204
+        assert computer.owner is person
+
+    def test_post_to_one(self):
+        person = self.Person(id=1)
+        computer = self.Computer(id=1)
+        self.session.add_all([person, computer])
+        self.session.commit()
+
+        # Posting to a relationship URL should work if no link exists yet.
+        data = dict(person='1')
+        response = self.app.post('/api/computer/1/links/owner',
+                                 data=dumps(data))
+        assert response.status_code == 204
+
+    def test_post_to_one_exists(self):
+        person1 = self.Person(id=1)
+        person2 = self.Person(id=2)
+        computer = self.Computer(id=1)
+        person1.computers = [computer]
+        self.session.add_all([person1, person2, computer])
+        self.session.commit()
+
+        # Posting to a relationship URL should fail if a link already exists.
+        data = dict(person='1')
+        response = self.app.post('/api/computer/1/links/owner',
+                                 data=dumps(data))
+        assert response.status_code == 400
+        # TODO check the error message and description here.
+
+    def test_delete_to_one(self):
+        person = self.Person(id=1)
+        computer = self.Computer(id=1)
+        person.computers = [computer]
+        self.session.add_all([person, computer])
+        self.session.commit()
+
+        # Delete a relationship (without deleting the linked resource itself).
+        response = self.app.delete('/api/computer/1/links/owner')
+        assert response.status_code == 204
+
+    def test_delete_to_one(self):
+        computer = self.Computer(id=1)
+        self.session.add(computer)
+        self.session.commit()
+
+        # Attempting to delete a relationship that doesn't exist should fail.
+        response = self.app.delete('/api/computer/1/links/owner')
+        assert response.status_code == 400
+        # TODO check the error message and description here.
+
+    def test_put_to_many(self):
+        person = self.Person(id=1)
+        computer1 = self.Computer(id=1)
+        computer2 = self.Computer(id=2)
+        self.session.add_all([person, computer1, computer2])
+        self.session.commit()
+
+        # Set the one-to-many relationship `computers` on a person instance.
+        data = dict(links=dict(computers=['1', '2']))
+        response = self.app.put('/api/person/1', data=dumps(data))
+        assert response.status_code == 204
+        assert computer1 in person.computers
+        assert computer2 in person.computers
+
+        # Remove everything from the relation.
+        data = dict(links=dict(computers=[]))
+        response = self.app.put('/api/person/1', data=dumps(data))
+        assert response.status_code == 204
+        assert person.computers == []
+
+    def test_put_to_many_relationship_url(self):
+        person = self.Person(id=1)
+        computer1 = self.Computer(id=1)
+        computer2 = self.Computer(id=2)
+        self.session.add_all([person, computer1, computer2])
+        self.session.commit()
+
+        # Set the one-to-many relationship `computers` on a person instance.
+        data = dict(computers=['1', '2'])
+        response = self.app.put('/api/person/1/links/computers',
+                                data=dumps(data))
+        assert response.status_code == 204
+        assert computer1 in person.computers
+        assert computer2 in person.computers
+
+    def test_post_to_many_relationship_url(self):
+        person = self.Person(id=1)
+        computer1 = self.Computer(id=1)
+        computer2 = self.Computer(id=2)
+        self.session.add_all([person, computer1, computer2])
+        self.session.commit()
+
+        # Add to the one-to-many relationship `computers` on a person instance.
+        data = dict(computers='1')
+        response = self.app.post('/api/person/1/links/computers',
+                                 data=dumps(data))
+        assert response.status_code == 204
+        assert computer1 in person.computers
+        assert computer2 not in person.computers
+
+    def test_post_to_many_relationship_url_multiple(self):
+        person = self.Person(id=1)
+        computer1 = self.Computer(id=1)
+        computer2 = self.Computer(id=2)
+        self.session.add_all([person, computer1, computer2])
+        self.session.commit()
+
+        # Add to the one-to-many relationship `computers` on a person instance.
+        data = dict(computers=['1', '2'])
+        response = self.app.post('/api/person/1/links/computers',
+                                 data=dumps(data))
+        assert response.status_code == 204
+        assert computer1 in person.computers
+        assert computer2 in person.computers
+
+    def test_post_already_exists(self):
+        person = self.Person(id=1)
+        self.session.add(person)
+        self.session.commit()
+
+        # Attempts to create a person that already exist return an error.
+        data = dict(person=dict(id=1))
+        response = self.app.post('/api/person', data=dumps(data))
+        assert response.status_code == 409  # Conflict
+
+    def test_delete_to_many(self):
+        person = self.Person(id=1)
+        computer1 = self.Computer(id=1)
+        computer2 = self.Computer(id=2)
+        self.session.add_all([person, computer1, computer2])
+        self.session.commit()
+
+        # Add to the one-to-many relationship `computers` on a person instance.
+        response = self.app.delete('/api/person/1/links/computers/1')
+        assert response.status_code == 204
+        assert person.computers == [computer2]
+
+    def test_delete_to_many_multiple(self):
+        person = self.Person(id=1)
+        computer1 = self.Computer(id=1)
+        computer2 = self.Computer(id=2)
+        self.session.add_all([person, computer1, computer2])
+        self.session.commit()
+
+        # Add to the one-to-many relationship `computers` on a person instance.
+        response = self.app.delete('/api/person/1/links/computers/1,2')
+        assert response.status_code == 204
+        assert person.computers == []
+
+    def test_put_nonexistent(self):
+        data = dict(name='bar')
+        response = self.app.put('/api/foo', data=dumps(data))
+        assert response.status_code == 404
+
+    def test_post_nonexistent_relationship(self):
+        data = dict(name='bar')
+        response = self.app.post('/api/person/1/links/foo', data=dumps(data))
+        assert response.status_code == 404
+
+    def test_delete_nonexistent_relationship(self):
+        response = self.app.delete('/api/person/1/links/foo')
+        assert response.status_code == 404
+
+    def test_delete(self):
+        person = self.Person(id=1)
+        self.session.add(person)
+        self.session.commit()
+
+        # Delete the person with ID 1.
+        response = self.app.delete('/api/person/1')
+        assert response.status_code == 204
+        assert Person.query.count() == 0
+
+    def test_delete_multiple(self):
+        person1 = self.Person(id=1)
+        person2 = self.Person(id=2)
+        self.session.add_all([person1, person2])
+        self.session.commit()
+
+        # Delete the person instances with IDs 1 and 2.
+        response = self.app.delete('/api/person/1,2')
+        assert response.status_code == 204
+        assert self.Person.query.count() == 0
+
+    def test_errors(self):
+        # TODO Test that errors are returned as described in JSON API docs.
+        pass
+
+    def test_json_patch_header(self):
+        self.session.add(self.Person())
+        self.session.commit()
+
+        # Requests must have the appropriate JSON Patch headers.
+        response = self.app.patch('/api/person/1',
+                                  content_type='application/vnd.api+json')
+        assert response.status_code == 400
+        response = self.app.patch('/api/person/1',
+                                  content_type='application/json')
+        assert response.status_code == 400
+
+    # TODO test bulk JSON Patch operations at the root level of the API.
+    def test_json_patch_create(self):
+        data = list(dict(op='add', path='/-', value=dict(name='foo')))
+        response = self.app.patch('/api/person', data=dumps(data))
+        assert response.status_code == 201
+        person = loads(response.data)
+        assert person['name'] == 'foo'
+
+    def test_json_patch_update(self):
+        person = self.Person(id=1, name='foo')
+        self.session.add(person)
+        self.session.commit()
+        data = list(dict(op='replace', path='/name', value='bar'))
+        response = self.app.patch('/api/person/1', data=dumps(data))
+        assert response.status_code == 204
+        assert person.name == 'bar'
+
+    def test_json_patch_to_one_relationship(self):
+        person1 = self.Person(id=1)
+        person2 = self.Person(id=2)
+        computer = self.Computer(id=1)
+        computer.owner = person1
+        self.session.add_all([person1, person2, computer])
+        self.session.commit()
+
+        # Change the owner of the computer from person 1 to person 2.
+        data = list(dict(op='replace', path='', value='2'))
+        response = self.app.patch('/api/computer/1/owner', data=dumps(data))
+        assert response.status_code == 204
+        assert computer.owner == person2
+
+    def test_json_patch_remove_to_one_relationship(self):
+        person = self.Person(id=1)
+        computer = self.Computer(id=1)
+        computer.owner = person
+        self.session.add_all([person, computer])
+        self.session.commit()
+
+        # Change the owner of the computer from person 1 to person 2.
+        data = list(dict(op='remove', path=''))
+        response = self.app.patch('/api/computer/1/owner', data=dumps(data))
+        assert response.status_code == 204
+        assert person.computers == []
+
+    def test_json_patch_to_many_relationship(self):
+        person = self.Person(id=1)
+        computer = self.Computer(id=1)
+        self.session.add_all([person, computer])
+        self.session.commit()
+
+        # Add computer 1 to the list of computers owned by person 1.
+        data = list(dict(op='add', path='/-', value='1'))
+        response = self.app.patch('/api/person/1/computers', data=dumps(data))
+        assert response.status_code == 204
+        assert person.computers == [computer]
+
+    def test_json_patch_remove_to_many_relationship(self):
+        person = self.Person(id=1)
+        computer = self.Computer(id=1)
+        person.computers = [computer]
+        self.session.add_all([person, computer])
+        self.session.commit()
+
+        # Remove computer 1 to the list of computers owned by person 1.
+        data = list(dict(op='remove', path='/1'))
+        response = self.app.patch('/api/person/1/computers', data=dumps(data))
+        assert response.status_code == 204
+        assert person.computers == []
+
+    def test_json_patch_delete(self):
+        person = self.Person(id=1)
+        self.session.add(person)
+        self.session.commit()
+
+        # Remove the person.
+        data = list(dict(op='remove', path=''))
+        response = self.app.patch('/api/person/1', data=dumps(data))
+        assert response.status_code == 204
+        assert self.Person.query.count() == 0
+
+    def test_json_patch_multiple(self):
+        # Create multiple person instances with a single request.
+        data = list(dict(op='add', path='/-', value=dict(name='foo')),
+                    dict(op='add', path='/-', value=dict(name='bar')))
+        response = self.app.patch('/api/person', data=dumps(data))
+        assert response.status_code == 200
+        assert response.content_type == 'application/json'
+        data = loads(response.data)
+        assert data[0]['person'][0]['name'] == 'foo'
+        assert data[1]['person'][0]['name'] == 'bar'
+
+
 class TestAPI(TestSupport):
     """Unit tests for the :class:`flask_restless.views.API` class."""
 
@@ -321,43 +935,31 @@ class TestAPI(TestSupport):
         # to facilitate searching
         self.app.search = lambda url, q: self.app.get(url + '?q={0}'.format(q))
 
-    def test_post(self):
-        """Test for creating a new instance of the database model using the
-        :http:method:`post` method.
-
-        """
+    def test_post_invalid_json(self):
         # Invalid JSON in request data should respond with error.
         response = self.app.post('/api/person', data='Invalid JSON string')
         assert response.status_code == 400
         assert loads(response.data)['message'] == 'Unable to decode data'
 
-        # Now, let's test the validation stuff
-        # response = self.app.post('/api/person', data=dumps({'name': u'Test',
-        #                                                      'age': 'oi'}))
-        # assert loads(response.data)['message'] == 'Validation error'
-        # assert loads(response.data)['error_list'].keys() == ['age']
-
-        # Test the integrity exception by violating the unique 'name' field
-        # of person
-        response = self.app.post('/api/person',
-                                 data=dumps({'name': u'George', 'age': 23}))
+    def test_post_integrity_error(self):
+        # Test the integrity exception by violating the unique 'name' field of
+        # the Person model.
+        person = dict(name=u'foo')
+        response = self.app.post('/api/person', data=dumps(person))
         assert response.status_code == 201
-
-        # This errors as expected
-        response = self.app.post('/api/person',
-                                 data=dumps({'name': u'George', 'age': 23}))
+        response = self.app.post('/api/person', data=dumps(person))
         assert response.status_code == 400
-        assert json.loads(response.data)['message'] == 'IntegrityError'
+        assert loads(response.data)['message'] == 'IntegrityError'
         assert self.session.is_active, "Session is in `partial rollback` state"
 
         # For issue #158 we make sure that the previous failure is rolled back
         # so that we can add valid entries again
-        response = self.app.post('/api/person',
-                                 data=dumps({'name': u'Benjamin', 'age': 23}))
+        person = dict(name=u'bar')
+        response = self.app.post('/api/person', data=dumps(person))
         assert response.status_code == 201
-
-        response = self.app.post('/api/person',
-                                 data=dumps({'name': u'Lincoln', 'age': 23}))
+        assert 'id' in loads(response.data)
+        person = dict(name=u'bar')
+        response = self.app.post('/api/person', data=dumps(person))
         assert response.status_code == 201
         assert 'id' in loads(response.data)
 
@@ -1208,45 +1810,51 @@ class TestAPI(TestSupport):
 
         response = self.app.get('/api/person')
         assert response.status_code == 200
-        assert loads(response.data)['page'] == 1
-        assert len(loads(response.data)['objects']) == 10
-        assert loads(response.data)['total_pages'] == 3
+        data = loads(response.data)
+        assert data['meta']['page'] == 1
+        assert len(data['objects']) == 10
+        assert data['meta']['total_pages'] == 3
 
         response = self.app.get('/api/person?page=1')
         assert response.status_code == 200
-        assert loads(response.data)['page'] == 1
-        assert len(loads(response.data)['objects']) == 10
-        assert loads(response.data)['total_pages'] == 3
+        data = loads(response.data)
+        assert data['meta']['page'] == 1
+        assert len(data['objects']) == 10
+        assert data['meta']['total_pages'] == 3
 
         response = self.app.get('/api/person?page=2')
         assert response.status_code == 200
-        assert loads(response.data)['page'] == 2
-        assert len(loads(response.data)['objects']) == 10
-        assert loads(response.data)['total_pages'] == 3
+        data = loads(response.data)
+        assert data['meta']['page'] == 2
+        assert len(data['objects']) == 10
+        assert data['meta']['total_pages'] == 3
 
         response = self.app.get('/api/person?page=3')
         assert response.status_code == 200
-        assert loads(response.data)['page'] == 3
-        assert len(loads(response.data)['objects']) == 5
-        assert loads(response.data)['total_pages'] == 3
+        data = loads(response.data)
+        assert data['meta']['page'] == 3
+        assert len(data['objects']) == 5
+        assert data['meta']['total_pages'] == 3
 
         response = self.app.get('/api/v2/person?page=3')
         assert response.status_code == 200
-        assert loads(response.data)['page'] == 3
-        assert len(loads(response.data)['objects']) == 5
-        assert loads(response.data)['total_pages'] == 5
+        data = loads(response.data)
+        assert data['meta']['page'] == 3
+        assert len(data['objects']) == 5
+        assert data['meta']['total_pages'] == 5
 
         response = self.app.get('/api/v3/person')
         assert response.status_code == 200
-        assert loads(response.data)['page'] == 1
-        assert len(loads(response.data)['objects']) == 25
-        assert loads(response.data)['total_pages'] == 1
+        data = loads(response.data)
+        assert data['meta']['page'] == 1
+        assert len(data['objects']) == 25
+        assert data['meta']['total_pages'] == 1
 
         response = self.app.get('/api/v3/person?page=2')
-        assert response.status_code == 200
-        assert loads(response.data)['page'] == 1
-        assert len(loads(response.data)['objects']) == 25
-        assert loads(response.data)['total_pages'] == 1
+        data = loads(response.data)
+        assert data['meta']['page'] == 1
+        assert len(data['objects']) == 25
+        assert data['meta']['total_pages'] == 1
 
     def test_num_results(self):
         """Tests that a request for (a subset of) all instances of a model
@@ -1261,8 +1869,7 @@ class TestAPI(TestSupport):
         response = self.app.get('/api/person')
         assert response.status_code == 200
         data = loads(response.data)
-        assert 'num_results' in data
-        assert data['num_results'] == 15
+        assert data['meta']['num_results'] == 15
 
     def test_alternate_primary_key(self):
         """Tests that models with primary keys which are not ``id`` columns are
@@ -1608,7 +2215,7 @@ class TestHeaders(TestSupportPrefilled):
         response = self.app.get('/api/person/1', content_type=None)
         assert 200 == response.status_code
         response = self.app.get('/api/person/1',
-                                content_type='application/json')
+                                content_type='application/vnd.api+json')
         assert 200 == response.status_code
         # A request that requires a body but without a Content-Type header
         # should produce an error (specifically, error 415 Unsupported media
@@ -1617,11 +2224,11 @@ class TestHeaders(TestSupportPrefilled):
                                  content_type=None)
         assert 415 == response.status_code
         response = self.app.post('/api/person', data=dumps(dict(name='foo')),
-                                 content_type='application/json')
+                                 content_type='application/vnd.api+json')
         assert 201 == response.status_code
         # A request without an Accept header should return JSON.
         assert 'Content-Type' in response.headers
-        assert 'application/json' == response.headers['Content-Type']
+        assert 'application/vnd.api+json' == response.headers['Content-Type']
         assert 'foo' == loads(response.data)['name']
         response = self.app.post('/api/person', data=dumps(dict(name='foo')),
                                  content_type=None)
@@ -1631,16 +2238,16 @@ class TestHeaders(TestSupportPrefilled):
                                   content_type=None)
         assert 415 == response.status_code
         response = self.app.patch('/api/person/6', data=dumps(dict(name='x')),
-                                  content_type='application/json')
+                                  content_type='application/vnd.api+json')
         assert 200 == response.status_code
-        content_type = 'application/json; charset=UTF-8'
+        content_type = 'application/vnd.api+json; charset=UTF-8'
         response = self.app.patch('/api/person/6', data=dumps(dict(name='x')),
                                   content_type=content_type)
         assert 200 == response.status_code
 
         # A request without an Accept header should return JSON.
         assert 'Content-Type' in response.headers
-        assert 'application/json' == response.headers['Content-Type']
+        assert 'application/vnd.api+json' == response.headers['Content-Type']
         assert 'x' == loads(response.data)['name']
 
     def test_content_type_msie(self):
@@ -1695,13 +2302,13 @@ class TestHeaders(TestSupportPrefilled):
         response = self.app.get('/api/person/1', headers=headers)
         assert 200 == response.status_code
         assert 'Content-Type' in response.headers
-        assert 'application/json' == response.headers['Content-Type']
+        assert 'application/vnd.api+json' == response.headers['Content-Type']
         assert 1 == loads(response.data)['id']
-        headers = dict(Accept='application/json')
+        headers = dict(Accept='application/vnd.api+json')
         response = self.app.get('/api/person/1', headers=headers)
         assert 200 == response.status_code
         assert 'Content-Type' in response.headers
-        assert 'application/json' == response.headers['Content-Type']
+        assert 'application/vnd.api+json' == response.headers['Content-Type']
         assert 1 == loads(response.data)['id']
         # Check for accepting XML.
         # headers = dict(Accept='application/xml')
