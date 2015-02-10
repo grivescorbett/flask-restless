@@ -535,7 +535,7 @@ class APIManager(object):
                                          'relationinstid': None},
                                view_func=api_view)
         # add endpoints which expose related models
-        relation_endpoint = '{0}/<relationname>'.format(instance_endpoint)
+        relation_endpoint = '{0}/links/<relationname>'.format(instance_endpoint)
         relation_instance_endpoint = \
             '{0}/<relationinstid>'.format(relation_endpoint)
         # For example, /api/person/1/computers.

@@ -405,11 +405,11 @@ class TestJsonAPI(TestSupport):
         response = self.app.get('/api/computer/1/links/owner')
         assert response.status_code == 200
         data = loads(response.data)
-        assert data['id'] == 1
+        assert data['id'] == '1'
         response = self.app.get('/api/computer/2/links/owner')
         assert response.status_code == 200
         data = loads(response.data)
-        assert data['id'] == 1
+        assert data['id'] == '1'
 
     def test_inclusion(self):
         # Create a person object with multiple computers.
