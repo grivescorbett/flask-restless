@@ -917,7 +917,7 @@ class API(ModelView):
         return min(results_per_page, self.max_results_per_page)
 
     # TODO it is ugly to have `deep` as an arg here; can we remove it?
-    def _paginated(self, instances, deep):
+    def _paginated(self, instances, type_, deep):
         """Returns a paginated JSONified response from the specified list of
         model instances.
 
@@ -956,7 +956,8 @@ class API(ModelView):
             start = 0
             end = num_results
             total_pages = 1
-        objects = [to_dict(x, deep, exclude=self.exclude_columns,
+        objects = [to_dict(x, type_=type_, deep=deep,
+                           exclude=self.exclude_columns,
                            exclude_relations=self.exclude_relations,
                            include=self.include_columns,
                            include_relations=self.include_relations,
@@ -992,7 +993,8 @@ class API(ModelView):
         else:
             includes = fields + (self.include_columns or [])
         deep = dict((r, {}) for r in relations)
-        return to_dict(inst, deep, exclude=self.exclude_columns,
+        return to_dict(inst, self.collection_name, deep=deep,
+                       exclude=self.exclude_columns,
                        exclude_relations=self.exclude_relations,
                        include=includes,
                        include_relations=self.include_relations,
@@ -1194,17 +1196,35 @@ class API(ModelView):
                                                 relationinstid)
                 if related_value_instance is None:
                     return {_STATUS: 404}, 404
-                result = to_dict(related_value_instance, deep)
+                # TODO Needs collection_name for related instance here:
+                #
+                #     result = to_dict(related_value_instance,
+                #                      collection_name(related_model))
+                #
+                result = to_dict(related_value_instance, relationname)
             else:
                 # for security purposes, don't transmit list as top-level JSON
                 if is_like_list(instance, relationname):
                     # TODO Disabled pagination for now in order to ease
                     # transition into JSON API compliance.
                     #
-                    # result = self._paginated(list(related_value), deep)
-                    result = [to_dict(instance) for instance in related_value]
+                    #     result = self._paginated(list(related_value), deep)
+                    #
+                    # TODO Needs collection_name for related model:
+                    #
+                    #     result = [to_dict(instance,
+                    #                       collection_name(related_model))
+                    #               for instance in related_value]
+                    #
+                    result = [to_dict(instance, relationname, deep)
+                              for instance in related_value]
                 else:
-                    result = to_dict(related_value, deep)
+                    # TODO Needs collection_name for related model:
+                    #
+                    #     result = to_dict(instance,
+                    #                      collection_name(related_model))
+                    #
+                    result = to_dict(related_value, relationname, deep)
         if result is None:
             return {_STATUS: 404}, 404
         # Wrap the resulting object or list of objects in an object with a
@@ -1251,10 +1271,14 @@ class API(ModelView):
                 related_instances = (get_by(self.session, related_model,
                                             link_id) for link_id in linkids)
                 # TODO I don't know the collection name for the linked objects,
-                # so I can't provide a correctly named mapping here.
+                # so I can't provide a correctly named mapping here:
                 #
-                # result['linked'][collection_name(link)] = ...
-                result['linked'][link] = [to_dict(instance)
+                #     linktype = collection_name(link)
+                #     result['linked'][linktype] = \
+                #         [to_dict(instance, linktype)
+                #          for instance in related_instances]
+                #
+                result['linked'][link] = [to_dict(instance, link)
                                           for instance in related_instances]
         for postprocessor in self.postprocessors['GET_SINGLE']:
             postprocessor(result=result)

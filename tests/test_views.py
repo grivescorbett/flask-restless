@@ -363,6 +363,19 @@ class TestJsonAPI(TestSupport):
         ownerid = computer['links']['owner']
         assert None == ownerid
 
+    def test_resource_types(self):
+        """Tests that each resource has a type and an ID."""
+        self.session.add_all([self.Person(id=1), self.Computer(id=1)])
+        self.session.commit()
+        response = self.app.get('/api/person/1')
+        person = loads(response.data)['person']
+        assert person['id'] == '1'
+        assert person['type'] == 'person'
+        response = self.app.get('/api/computer/1')
+        person = loads(response.data)['computer']
+        assert person['id'] == '1'
+        assert person['type'] == 'computer'
+
     def test_top_level_links(self):
         # Create a person object with multiple computers.
         person = self.Person(id=1, name='foo')

@@ -277,7 +277,7 @@ def is_mapped_class(cls):
 
 # This code was adapted from :meth:`elixir.entity.Entity.to_dict` and
 # http://stackoverflow.com/q/1958219/108197.
-def to_dict(instance, deep=None, exclude=None, include=None,
+def to_dict(instance, type_, deep=None, exclude=None, include=None,
             exclude_relations=None, include_relations=None,
             include_methods=None):
     """Returns a dictionary representing the fields of the specified `instance`
@@ -287,6 +287,9 @@ def to_dict(instance, deep=None, exclude=None, include=None,
     :func:`flask.jsonify`; :class:`datetime.date` and :class:`uuid.UUID`
     objects are converted to string representations, so no special JSON encoder
     behavior is required.
+
+    `type_` is a string representing the resource type of `instance`, as
+    required by JSON API.
 
     `deep` is a dictionary containing a mapping from a relation name (for a
     relation of `instance`) to either a list or a dictionary. This is a
@@ -406,6 +409,8 @@ def to_dict(instance, deep=None, exclude=None, include=None,
         if isinstance(relatedvalue, Query):
             relatedvalue = relatedvalue.one()
         result['links'][relation] = str(primary_key_value(relatedvalue))
+    # Add the resource type to the result dictionary.
+    result['type'] = type_
     return result
 
 
