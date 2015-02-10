@@ -993,12 +993,20 @@ class API(ModelView):
         else:
             includes = fields + (self.include_columns or [])
         deep = dict((r, {}) for r in relations)
-        return to_dict(inst, self.collection_name, deep=deep,
-                       exclude=self.exclude_columns,
-                       exclude_relations=self.exclude_relations,
-                       include=includes,
-                       include_relations=self.include_relations,
-                       include_methods=self.include_methods)
+        result = to_dict(inst, self.collection_name, deep=deep,
+                         exclude=self.exclude_columns,
+                         exclude_relations=self.exclude_relations,
+                         include=includes,
+                         include_relations=self.include_relations,
+                         include_methods=self.include_methods)
+        # TODO Add a self link.
+        result['links'] = {}
+        # TODO Need url_for(instance) here:
+        #
+        #     result['links']['self'] = url_for(inst)
+        #
+        result['links']['self'] = request.base_url
+        return result
 
     def _instid_to_dict(self, instid):
         """Returns the dictionary representation of the instance specified by

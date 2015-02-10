@@ -376,6 +376,27 @@ class TestJsonAPI(TestSupport):
         assert person['id'] == '1'
         assert person['type'] == 'computer'
 
+    def test_self_links(self):
+        person = self.Person(id=1)
+        self.session.add(person)
+        self.session.commit()
+        response = self.app.get('/api/person/1')
+        data = loads(response.data)
+        person = data['person']
+        assert person['links']['self'].endswith('/api/person/1')
+
+    def test_self_links_in_relationship(self):
+        person = self.Person(id=1)
+        computer = self.Computer(id=1)
+        person.computers = [computer]
+        self.session.add_all([person, computer])
+        self.session.commit()
+        response = self.app.get('/api/computer/1/links/owner')
+        data = loads(response.data)
+        # TODO This should be data['person'], but we currently can't do that.
+        person = data['owner']
+        assert person['links']['self'].endswith('/api/person/1')
+
     def test_top_level_links(self):
         # Create a person object with multiple computers.
         person = self.Person(id=1, name='foo')
