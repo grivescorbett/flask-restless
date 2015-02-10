@@ -986,7 +986,7 @@ class API(ModelView):
         # be included.
         fields = request.args.get('fields', None)
         if fields is not None:
-            fields = includes.split(',')
+            fields = fields.split(',')
         if fields is None and self.include_columns is None:
             includes = None
         else:
@@ -1256,8 +1256,12 @@ class API(ModelView):
         # request.
         if any(status == 404 for data, status in result):
             return {_STATUS: 404}, 404
-        # Wrap the collection with the collection name.
-        return {self.collection_name: [data for data, status in result]}, 200
+        # HACK This should really not be necessary.
+        #
+        # Collect all the instances into a single list and wrap the collection
+        # with the collection name.
+        collection = [data[self.collection_name] for data, status in result]
+        return {self.collection_name: collection}, 200
 
     def get(self, instid, relationname, relationinstid):
         """Returns a JSON representation of an instance of model with the
@@ -1556,18 +1560,19 @@ class API(ModelView):
         else:
             # Unwrap the data from the collection name key.
             data = data[self.collection_name]
-            # Check for any request parameter naming a column which does not exist
-            # on the current model.
+            # Check for any request parameter naming a column which does not
+            # exist on the current model.
             #
-            # Incoming data could be a list or a single resource representation.
+            # Incoming data could be a list or a single resource
+            # representation.
             fields = set(chain(data)) if isinstance(data, list) else data.keys()
             for field in fields:
                 if not has_field(self.model, field):
                     msg = "Model does not have field '{0}'".format(field)
                     return dict(message=msg), 400
 
-            # Special case: if there are any dates, convert the string form of the
-            # date into an instance of the Python ``datetime`` object.
+            # Special case: if there are any dates, convert the string form of
+            # the date into an instance of the Python ``datetime`` object.
             if isinstance(data, list):
                 data = [strings_to_dates(self.model, d) for d in data]
             else:
@@ -1586,10 +1591,11 @@ class API(ModelView):
                 self.session.commit()
             except self.validation_exceptions as exception:
                 return self._handle_validation_exception(exception)
-            # Get the dictionary representation of the new instance or instances.
+            # Get the dictionary representation of the new instance or
+            # instances.
             result = [self._inst_to_dict(instance) for instance in instances]
-            # Determine the value of the primary key for this instance or instances
-            # and URL-encode it (in case it is a Unicode string).
+            # Determine the value of the primary key for this instance or
+            # instances and URL-encode it (in case it is a Unicode string).
             primary_keys = []
             for instance in instances:
                 primary_key = primary_key_value(instance)
@@ -1603,9 +1609,10 @@ class API(ModelView):
             urls = ['{0}/{1}'.format(request.base_url, k) for k in primary_keys]
             # Provide that URL in the Location header in the response.
             headers = (('Location', url) for url in urls)
-            # HACK-ish: Finall, if the original post was for a single resource,
-            # just unwrap it from its list.
-            result = result[0]
+            # HACK-ish: Finally, if the original post was for a single
+            # resource, just unwrap it from its list.
+            if not isinstance(created, list):
+                result = result[0]
             # Wrap the resulting object or list of objects in an object with a
             # mapping from the collection name to the object or list of
             # objects.
@@ -1614,6 +1621,75 @@ class API(ModelView):
         for postprocessor in self.postprocessors['POST']:
             postprocessor(result=result)
         return result, status, headers
+
+    def _update_single(self, instance, data):
+        # Update any relationships.
+        links = data.pop('links', {})
+        for link, values in links.items():
+            related_model = get_related_model(self.model, link)
+            if values is None:
+                setattr(instance, link, None)
+                continue
+            if isinstance(values, list):
+                instances = [get_by(self.session, related_model,
+                                    related_id)
+                             for related_id in values]
+            else:
+                instances = get_by(self.session, related_model, values)
+            try:
+                setattr(instance, link, instances)
+            except self.validation_exceptions as exception:
+                current_app.logger.exception(str(exception))
+                return self._handle_validation_exception(exception)
+
+        # Check for any request parameter naming a column which does not
+        # exist on the current model.
+        #
+        # Incoming data could be a list or a single resource
+        # representation.
+        if isinstance(data, list):
+            fields = set(chain(data))
+        else:
+            fields = data.keys()
+        for field in fields:
+            if not has_field(self.model, field):
+                msg = "Model does not have field '{0}'".format(field)
+                return dict(message=msg), 400
+
+        # if putmany:
+        #     try:
+        #         # create a SQLALchemy Query from the query parameter `q`
+        #         query = create_query(self.session, self.model, search_params)
+        #     except Exception as exception:
+        #         current_app.logger.exception(str(exception))
+        #         return dict(message='Unable to construct query'), 400
+        # else:
+        for link, value in data.pop('links', {}).items():
+            related_model = get_related_model(self.model, link)
+            related_instance = get_by(self.session, related_model, value)
+            try:
+                setattr(instance, link, related_instance)
+            except self.validation_exceptions as exception:
+                current_app.logger.exception(str(exception))
+                return self._handle_validation_exception(exception)
+        #field_list = frozenset(data) ^ relations
+        #data = dict((field, data[field]) for field in field_list)
+
+        # Special case: if there are any dates, convert the string form of the
+        # date into an instance of the Python ``datetime`` object.
+        data = strings_to_dates(self.model, data)
+
+        try:
+            # Let's update all instances present in the query
+            num_modified = 0
+            if data:
+                for field, value in data.items():
+                    setattr(instance, field, value)
+                num_modified += 1
+            self.session.commit()
+        except self.validation_exceptions as exception:
+            current_app.logger.exception(str(exception))
+            return self._handle_validation_exception(exception)
 
     def put(self, instid, relationname, relationinstid):
         """Updates the instance specified by ``instid`` of the named model, or
@@ -1680,7 +1756,12 @@ class API(ModelView):
                 if temp_result is not None:
                     instid = temp_result
         # Get the instance on which to set the new attributes.
-        instance = get_by(self.session, self.model, instid)
+        if ',' in instid:
+            ids = instid.split(',')
+            #instances = [get_by(self.session, self.model, id_) for id_ in ids]
+        else:
+            ids = instid
+            #instances = get_by(self.session, self.model, instid)
         # Check if this is a request to update a relation.
         if (instid is not None and relationname is not None
             and relationinstid is None):
@@ -1699,81 +1780,34 @@ class API(ModelView):
                 related_instance = get_by(self.session, related_model,
                                           related_id)
             try:
+                if isinstance(ids, list):
+                    msg = ('This API does not support setting links on'
+                           ' multiple resources')
+                    return dict(message=msg), 400
+                instance = get_by(self.session, self.model, ids,
+                                  self.primary_key)
                 setattr(instance, relationname, related_instance)
             except self.validation_exceptions as exception:
                 current_app.logger.exception(str(exception))
                 return self._handle_validation_exception(exception)
         else:
-            # Update any relationships.
-            links = data.pop('links', {})
-            for link, values in links.items():
-                related_model = get_related_model(self.model, link)
-                instances = [get_by(self.session, related_model, related_id)
-                             for related_id in values]
-                setattr(instance, link, instances)
-
             # Unwrap the data from the collection name key.
             data = data.pop(self.collection_name, {})
-
-            # Check for any request parameter naming a column which does not
-            # exist on the current model.
-            #
-            # Incoming data could be a list or a single resource
-            # representation.
+            # If we are attempting to update multiple objects.
             if isinstance(data, list):
-                fields = set(chain(data))
-            else:
-                fields = data.keys()
-            for field in fields:
-                if not has_field(self.model, field):
-                    msg = "Model does not have field '{0}'".format(field)
+                # Check that the IDs specified in the body of the request match
+                # the IDs specified in the URL.
+                if not all('id' in d and str(d['id']) in ids for d in data):
+                    msg = 'IDs in body of request must match IDs in URL'
                     return dict(message=msg), 400
-
-            if putmany:
-                try:
-                    # create a SQLALchemy Query from the query parameter `q`
-                    query = create_query(self.session, self.model, search_params)
-                except Exception as exception:
-                    current_app.logger.exception(str(exception))
-                    return dict(message='Unable to construct query'), 400
+                for newdata in data:
+                    instance = get_by(self.session, self.model, newdata['id'],
+                                      self.primary_key)
+                    self._update_single(instance, newdata)
             else:
-                # create a SQLAlchemy Query which has exactly the specified row
-                query = query_by_primary_key(self.session, self.model, instid,
-                                             self.primary_key)
-                if query.count() == 0:
-                    return {_STATUS: 404}, 404
-                assert query.count() == 1, 'Multiple rows with same ID'
-
-            try:
-                for link, value in data.pop('links', {}).items():
-                    # TODO This fails if the query is for multiple.
-                    instance = query.first()
-                    related_model = get_related_model(self.model, link)
-                    related_instance = get_by(self.session, related_model, value)
-                    setattr(instance, link, related_instance)
-            except self.validation_exceptions as exception:
-                current_app.logger.exception(str(exception))
-                return self._handle_validation_exception(exception)
-            #field_list = frozenset(data) ^ relations
-            #data = dict((field, data[field]) for field in field_list)
-
-            # Special case: if there are any dates, convert the string form of the
-            # date into an instance of the Python ``datetime`` object.
-            data = strings_to_dates(self.model, data)
-
-            try:
-                # Let's update all instances present in the query
-                num_modified = 0
-                if data:
-                    for item in query.all():
-                        for field, value in data.items():
-                            setattr(item, field, value)
-                        num_modified += 1
-                self.session.commit()
-            except self.validation_exceptions as exception:
-                current_app.logger.exception(str(exception))
-                return self._handle_validation_exception(exception)
-
+                instance = get_by(self.session, self.model, instid,
+                                  self.primary_key)
+                self._update_single(instance, data)
         # Perform any necessary postprocessing.
         if putmany:
             for postprocessor in self.postprocessors['PUT_MANY']:

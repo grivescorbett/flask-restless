@@ -307,7 +307,8 @@ class TestJsonAPI(TestSupport):
                                 methods=['GET', 'PUT', 'PATCH', 'POST',
                                          'DELETE'])
         self.manager.create_api(self.Computer,
-                                methods=['GET', 'POST', 'PATCH', 'PUT'],
+                                methods=['GET', 'POST', 'PATCH', 'PUT',
+                                         'DELETE'],
                                 # TODO Shouldn't need to do this anymore...
                                 allow_patch_many=True)
 
@@ -328,34 +329,38 @@ class TestJsonAPI(TestSupport):
         response = self.app.get('/api/person/1')
         assert response.status_code == 200
         data = loads(response.data)
-        assert data['id'] == '1'
-        assert data['name'] == 'foo'
-        computerids = data['links']['computers']
+        person = data['person']
+        assert person['id'] == '1'
+        assert person['name'] == 'foo'
+        computerids = person['links']['computers']
         assert sorted(['1', '2']) == sorted(computerids)
 
         # A person without any computers should have an empty list there.
         response = self.app.get('/api/person/2')
         assert response.status_code == 200
         data = loads(response.data)
-        assert data['id'] == '2'
-        assert data['name'] == 'bar'
-        assert [] == data['links']['computers']
+        person = data['person']
+        assert person['id'] == '2'
+        assert person['name'] == 'bar'
+        assert [] == person['links']['computers']
 
         # Get one of the computers and ensure that its many-to-one link is the
         # ID of the person that owns it.
         response = self.app.get('/api/computer/1')
         assert response.status_code == 200
         data = loads(response.data)
-        assert data['id'] == '1'
-        ownerid = data['links']['owner']
+        computer = data['computer']
+        assert computer['id'] == '1'
+        ownerid = computer['links']['owner']
         assert '1' == ownerid
 
         # A computer without an owner should have a null value there.
         response = self.app.get('/api/computer/3')
         assert response.status_code == 200
         data = loads(response.data)
-        assert data['id'] == '3'
-        ownerid = data['links']['owner']
+        computer = data['computer']
+        assert computer['id'] == '3'
+        ownerid = computer['links']['owner']
         assert None == ownerid
 
     def test_top_level_links(self):
@@ -387,7 +392,7 @@ class TestJsonAPI(TestSupport):
         response = self.app.get('/api/person/1,2')
         assert response.status_code == 200
         data = loads(response.data)
-        assert sorted(['1', '2']) == sorted(p['id'] for p in data['objects'])
+        assert sorted(['1', '2']) == sorted(p['id'] for p in data['person'])
 
     def test_get_relationships(self):
         # Create a person object with multiple computers.
@@ -483,22 +488,24 @@ class TestJsonAPI(TestSupport):
         # Test sorting by age.
         response = self.app.get('/api/person/1,3?sort=age')
         assert response.status_code == 200
-        p1, p3 = loads(response.data)['objects']
-        assert p1.age < p3.age
+        data = loads(response.data)
+        p1, p2 = data['person']
+        assert p1['age'] < p2['age']
 
         # Test sorting in reverse order.
         response = self.app.get('/api/person/1,3?sort=-age')
         assert response.status_code == 200
-        p1, p3 = loads(response.data)['objects']
-        assert p1.age > p3.age
+        data = loads(response.data)
+        p1, p2 = data['person']
+        assert p1['age'] > p2['age']
 
         # Test sorting by multiple fields.
         response = self.app.get('/api/person?sort=-age,name')
         assert response.status_code == 200
         p1, p2, p3, p4 = loads(response.data)['objects']
-        assert p1.age == p2.age > p3.age == p4.age
-        assert p1.name <= p2.name
-        assert p3.name <= p4.name
+        assert p1['age'] == p2['age'] > p3['age'] == p4['age']
+        assert p1['name'] <= p2['name']
+        assert p3['name'] <= p4['name']
         # TODO test the more complicated sorting syntax
 
     def test_post(self):
@@ -690,14 +697,14 @@ class TestJsonAPI(TestSupport):
         self.session.commit()
 
         # Set the one-to-many relationship `computers` on a person instance.
-        data = dict(links=dict(computers=['1', '2']))
+        data = dict(person=dict(links=dict(computers=['1', '2'])))
         response = self.app.put('/api/person/1', data=dumps(data))
         assert response.status_code == 204
         assert computer1 in person.computers
         assert computer2 in person.computers
 
         # Remove everything from the relation.
-        data = dict(links=dict(computers=[]))
+        data = dict(person=dict(links=dict(computers=[])))
         response = self.app.put('/api/person/1', data=dumps(data))
         assert response.status_code == 204
         assert person.computers == []
