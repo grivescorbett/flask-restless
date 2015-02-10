@@ -518,13 +518,13 @@ class APIManager(object):
         # TODO should the url_prefix be specified here or in register_blueprint
         blueprint = Blueprint(blueprintname, __name__, url_prefix=url_prefix)
         # For example, /api/person.
-        blueprint.add_url_rule(collection_endpoint,
-                               methods=no_instance_methods, view_func=api_view)
+        # blueprint.add_url_rule(collection_endpoint,
+        #                        methods=['GET', 'POST'], view_func=api_view)
         # For example, /api/person/1.
         blueprint.add_url_rule(collection_endpoint,
                                defaults={'instid': None, 'relationname': None,
                                          'relationinstid': None},
-                               methods=possibly_empty_instance_methods,
+                               methods=frozenset(['GET', 'POST']) & methods,
                                view_func=api_view)
         # the per-instance endpoints will allow both integer and string primary
         # key accesses
@@ -541,7 +541,8 @@ class APIManager(object):
             '{0}/<relationinstid>'.format(relation_endpoint)
         # For example, /api/person/1/links/computers.
         blueprint.add_url_rule(relation_endpoint,
-                               methods=['GET', 'PUT', 'POST', 'DELETE'],
+                               methods=frozenset(['GET', 'PUT', 'POST',
+                                                  'DELETE']) & methods,
                                defaults={'relationinstid': None},
                                view_func=api_view)
         # For example, /api/person/1/links/computers/2.

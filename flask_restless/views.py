@@ -41,6 +41,7 @@ from sqlalchemy.exc import DataError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.orm.exc import FlushError
 from sqlalchemy.orm.exc import MultipleResultsFound
 from sqlalchemy.orm.exc import NoResultFound
 from sqlalchemy.orm.query import Query
@@ -83,8 +84,12 @@ _STATUS = '__restless_status_code'
 #: The Content-Type we expect for most requests to APIs.
 CONTENT_TYPE = 'application/vnd.api+json'
 
+#: SQLAlchemy errors that, when caught, trigger a rollback of the session.
+ROLLBACK_ERRORS = (DataError, IntegrityError, ProgrammingError, FlushError)
+
 # For the sake of brevity, rename this function.
 chain = chain.from_iterable
+
 
 class ProcessingException(HTTPException):
     """Raised when a preprocessor or postprocessor encounters a problem.
@@ -184,10 +189,12 @@ def catch_integrity_errors(session):
             try:
                 return func(*args, **kw)
             # TODO should `sqlalchemy.exc.InvalidRequestError`s also be caught?
-            except (DataError, IntegrityError, ProgrammingError) as exception:
+            except ROLLBACK_ERRORS as exception:
                 session.rollback()
                 current_app.logger.exception(str(exception))
-                return dict(message=type(exception).__name__), 400
+                # Special status code for conflicting instances: 409 Conflict
+                status = 409 if 'conflicts with' in str(exception) else 400
+                return dict(message=type(exception).__name__), status
         return wrapped
     return decorator
 
@@ -1363,26 +1370,50 @@ class API(ModelView):
             # See the note under the preprocessor in the get() method.
             if temp_result is not None:
                 instid = temp_result
-        inst = get_by(self.session, self.model, instid, self.primary_key)
+        if ',' in instid:
+            ids = instid.split(',')
+            inst = [get_by(self.session, self.model, id_, self.primary_key)
+                    for id_ in ids]
+        else:
+            inst = get_by(self.session, self.model, instid, self.primary_key)
         if relationname is not None:
-            # If there is no link there to delete, return an error.
-            if getattr(inst, relationname) is None:
-                msg = 'No linked instance to delete: {0}'.format(relationname)
-                return dict(message=msg), 400
-            # TODO this doesn't apply to a many-to-one endpoint applies
-            #
-            # if not relationinstid:
-            #     msg = ('Cannot DELETE entire "{0}"'
-            #            ' relation').format(relationname)
-            #     return dict(message=msg), 400
-            #
-            # Otherwise, remove the related instance.
-            setattr(inst, relationname, None)
-            # Removes an object from the relation list.
-            #relation.remove(relation_instance)
+            # If no such relation exists, return an error to the client.
+            if not hasattr(inst, relationname):
+                msg = 'No such link: {0}'.format(relationname)
+                return dict(message=msg), 404
+            # If this is a delete of a one-to-many relationship, remove the
+            # related instance.
+            if relationinstid is not None:
+                related_model = get_related_model(self.model, relationname)
+                relation = getattr(inst, relationname)
+                if ',' in relationinstid:
+                    ids = relationinstid.split(',')
+                else:
+                    ids = [relationinstid]
+                toremove = (get_by(self.session, related_model, id_) for id_ in
+                            ids)
+                for obj in toremove:
+                    relation.remove(obj)
+            else:
+                # If there is no link there to delete, return an error.
+                if getattr(inst, relationname) is None:
+                    msg = 'No linked instance to delete: {0}'.format(relationname)
+                    return dict(message=msg), 400
+                # TODO this doesn't apply to a many-to-one endpoint applies
+                #
+                # if not relationinstid:
+                #     msg = ('Cannot DELETE entire "{0}"'
+                #            ' relation').format(relationname)
+                #     return dict(message=msg), 400
+                #
+                # Otherwise, remove the related instance.
+                setattr(inst, relationname, None)
             was_deleted = len(self.session.dirty) > 0
         elif inst is not None:
-            self.session.delete(inst)
+            if not isinstance(inst, list):
+                inst = [inst]
+            for instance in inst:
+                self.session.delete(instance)
             was_deleted = len(self.session.deleted) > 0
         self.session.commit()
         for postprocessor in self.postprocessors['DELETE_SINGLE']:
@@ -1481,26 +1512,44 @@ class API(ModelView):
             and relationinstid is None):
             # Get the instance on which to set the relationship info.
             instance = get_by(self.session, self.model, instid)
-            # If there is already something there, return an error.
-            if getattr(instance, relationname) is not None:
-                msg = ('Cannot POST to a -to-one relationship that already has'
-                       ' a linked instance (with ID'
-                       ' {0})').format(relationinstid)
-                return dict(message=msg), 400
+            # If no such relation exists, return an error to the client.
+            if not hasattr(instance, relationname):
+                msg = 'No such link: {0}'.format(relationname)
+                return dict(message=msg), 404
             related_model = get_related_model(self.model, relationname)
-            # Get the ID of the related model to which to set the link.
-            #
-            # TODO I don't know the collection name for the linked objects, so
-            # I can't provide a correctly named mapping here.
-            #
-            # related_id = data[collection_name(related_model)]
-            related_id = data.popitem()[1]
-            related_instance = get_by(self.session, related_model, related_id)
-            try:
-                setattr(instance, relationname, related_instance)
-            except self.validation_exceptions as exception:
-                current_app.logger.exception(str(exception))
-                return self._handle_validation_exception(exception)
+            relation = getattr(instance, relationname)
+            # If it is -to-many relation, add to the existing list.
+            if is_like_list(instance, relationname):
+                related_id = data.pop(relationname)
+                if isinstance(related_id, list):
+                    related_instances = [get_by(self.session, related_model,
+                                                d) for d in related_id]
+                else:
+                    related_instances = [get_by(self.session, related_model,
+                                                related_id)]
+                relation.extend(related_instances)
+            # Otherwise it is a -to-one relation.
+            else:
+                # If there is already something there, return an error.
+                if relation is not None:
+                    msg = ('Cannot POST to a -to-one relationship that already'
+                           ' has a linked instance (with ID'
+                           ' {0})').format(relationinstid)
+                    return dict(message=msg), 400
+                # Get the ID of the related model to which to set the link.
+                #
+                # TODO I don't know the collection name for the linked objects,
+                # so I can't provide a correctly named mapping here.
+                #
+                # related_id = data[collection_name(related_model)]
+                related_id = data.popitem()[1]
+                related_instance = get_by(self.session, related_model,
+                                          related_id)
+                try:
+                    setattr(instance, relationname, related_instance)
+                except self.validation_exceptions as exception:
+                    current_app.logger.exception(str(exception))
+                    return self._handle_validation_exception(exception)
             result = {}
             status = 204
             headers = {}
@@ -1525,8 +1574,9 @@ class API(ModelView):
                 data = strings_to_dates(self.model, data)
 
             try:
-                # Make instances a list version of created to facilitate getting
-                # the primary key and creating the Location headers below.
+                # Make instances a list version of created to facilitate
+                # getting the primary key and creating the Location headers
+                # below.
                 if isinstance(data, list):
                     created = [self._create_single(d) for d in data]
                     instances = created
@@ -1629,12 +1679,11 @@ class API(ModelView):
                 # See the note under the preprocessor in the get() method.
                 if temp_result is not None:
                     instid = temp_result
-
+        # Get the instance on which to set the new attributes.
+        instance = get_by(self.session, self.model, instid)
         # Check if this is a request to update a relation.
         if (instid is not None and relationname is not None
             and relationinstid is None):
-            # Get the instance on which to set the relationship info.
-            instance = get_by(self.session, self.model, instid)
             related_model = get_related_model(self.model, relationname)
             # Get the ID of the related model to which to set the link.
             #
@@ -1643,27 +1692,42 @@ class API(ModelView):
             #
             # related_id = data[collection_name(related_model)]
             related_id = data.popitem()[1]
-            related_instance = get_by(self.session, related_model, related_id)
+            if isinstance(related_id, list):
+                related_instance = [get_by(self.session, related_model, d)
+                                    for d in related_id]
+            else:
+                related_instance = get_by(self.session, related_model,
+                                          related_id)
             try:
                 setattr(instance, relationname, related_instance)
             except self.validation_exceptions as exception:
                 current_app.logger.exception(str(exception))
                 return self._handle_validation_exception(exception)
         else:
+            # Update any relationships.
+            links = data.pop('links', {})
+            for link, values in links.items():
+                related_model = get_related_model(self.model, link)
+                instances = [get_by(self.session, related_model, related_id)
+                             for related_id in values]
+                setattr(instance, link, instances)
+
             # Unwrap the data from the collection name key.
-            data = data[self.collection_name]
+            data = data.pop(self.collection_name, {})
 
-            # TODO Below, we need to recurse into 'links' as well.
-
-            # # Check for any request parameter naming a column which does not exist
-            # # on the current model.
-            # #
-            # # Incoming data could be a list or a single resource representation.
-            # fields = set(chain(data)) if isinstance(data, list) else data.keys()
-            # for field in fields:
-            #     if not has_field(self.model, field):
-            #         msg = "Model does not have field '{0}'".format(field)
-            #         return dict(message=msg), 400
+            # Check for any request parameter naming a column which does not
+            # exist on the current model.
+            #
+            # Incoming data could be a list or a single resource
+            # representation.
+            if isinstance(data, list):
+                fields = set(chain(data))
+            else:
+                fields = data.keys()
+            for field in fields:
+                if not has_field(self.model, field):
+                    msg = "Model does not have field '{0}'".format(field)
+                    return dict(message=msg), 400
 
             if putmany:
                 try:

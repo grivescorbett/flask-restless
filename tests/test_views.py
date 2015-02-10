@@ -761,10 +761,12 @@ class TestJsonAPI(TestSupport):
         person = self.Person(id=1)
         computer1 = self.Computer(id=1)
         computer2 = self.Computer(id=2)
+        person.computers = [computer1, computer2]
         self.session.add_all([person, computer1, computer2])
         self.session.commit()
 
-        # Add to the one-to-many relationship `computers` on a person instance.
+        # Delete from the the one-to-many relationship `computers` on a person
+        # instance.
         response = self.app.delete('/api/person/1/links/computers/1')
         assert response.status_code == 204
         assert person.computers == [computer2]
@@ -773,6 +775,7 @@ class TestJsonAPI(TestSupport):
         person = self.Person(id=1)
         computer1 = self.Computer(id=1)
         computer2 = self.Computer(id=2)
+        person.computers = [computer1, computer2]
         self.session.add_all([person, computer1, computer2])
         self.session.commit()
 
@@ -803,7 +806,7 @@ class TestJsonAPI(TestSupport):
         # Delete the person with ID 1.
         response = self.app.delete('/api/person/1')
         assert response.status_code == 204
-        assert Person.query.count() == 0
+        assert self.session.query(self.Person).count() == 0
 
     def test_delete_multiple(self):
         person1 = self.Person(id=1)
@@ -814,11 +817,28 @@ class TestJsonAPI(TestSupport):
         # Delete the person instances with IDs 1 and 2.
         response = self.app.delete('/api/person/1,2')
         assert response.status_code == 204
-        assert self.Person.query.count() == 0
+        assert self.session.query(self.Person).count() == 0
 
     def test_errors(self):
         # TODO Test that errors are returned as described in JSON API docs.
         pass
+
+
+class TestJsonPatch(TestSupport):
+
+    def setUp(self):
+        """Creates the database, the :class:`~flask.Flask` object, the
+        :class:`~flask_restless.manager.APIManager` for that application, and
+        creates the ReSTful API endpoints for the :class:`testapp.Person` and
+        :class:`testapp.Computer` models.
+
+        """
+        # create the database
+        super(TestJsonAPI, self).setUp()
+
+        # setup the URLs for the Person and Computer API
+        self.manager.create_api(self.Person, methods=['PATCH'])
+        self.manager.create_api(self.Computer, methods=['PATCH'])
 
     def test_json_patch_header(self):
         self.session.add(self.Person())
