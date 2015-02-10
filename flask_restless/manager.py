@@ -535,15 +535,16 @@ class APIManager(object):
                                          'relationinstid': None},
                                view_func=api_view)
         # add endpoints which expose related models
-        relation_endpoint = '{0}/links/<relationname>'.format(instance_endpoint)
+        relation_endpoint = \
+            '{0}/links/<relationname>'.format(instance_endpoint)
         relation_instance_endpoint = \
             '{0}/<relationinstid>'.format(relation_endpoint)
-        # For example, /api/person/1/computers.
+        # For example, /api/person/1/links/computers.
         blueprint.add_url_rule(relation_endpoint,
-                               methods=possibly_empty_instance_methods,
+                               methods=['GET', 'PUT', 'POST', 'DELETE'],
                                defaults={'relationinstid': None},
                                view_func=api_view)
-        # For example, /api/person/1/computers/2.
+        # For example, /api/person/1/links/computers/2.
         blueprint.add_url_rule(relation_instance_endpoint,
                                methods=instance_methods,
                                view_func=api_view)

@@ -304,9 +304,12 @@ class TestJsonAPI(TestSupport):
 
         # setup the URLs for the Person and Computer API
         self.manager.create_api(self.Person,
-                                methods=['GET', 'PATCH', 'POST', 'DELETE'])
+                                methods=['GET', 'PUT', 'PATCH', 'POST',
+                                         'DELETE'])
         self.manager.create_api(self.Computer,
-                                methods=['GET', 'POST', 'PATCH'])
+                                methods=['GET', 'POST', 'PATCH', 'PUT'],
+                                # TODO Shouldn't need to do this anymore...
+                                allow_patch_many=True)
 
     def test_get(self):
         # Create a person object with multiple computers.
@@ -503,7 +506,6 @@ class TestJsonAPI(TestSupport):
         response = self.app.post('/api/person', data=dumps(data))
         assert response.status_code == 201
         person = loads(response.data)['person']
-        print(person)
         assert person['id'] == '1'
         assert person['name'] == 'foo'
         assert person['age'] == 10
@@ -670,7 +672,7 @@ class TestJsonAPI(TestSupport):
         response = self.app.delete('/api/computer/1/links/owner')
         assert response.status_code == 204
 
-    def test_delete_to_one(self):
+    def test_delete_to_one_nonexistent(self):
         computer = self.Computer(id=1)
         self.session.add(computer)
         self.session.commit()
