@@ -944,8 +944,9 @@ class API(ModelView):
                            include_relations=self.include_relations,
                            include_methods=self.include_methods)
                    for x in instances[start:end]]
-        return dict(page=page_num, objects=objects, total_pages=total_pages,
-                    num_results=num_results)
+        return dict(meta=dict(page=page_num, total_pages=total_pages,
+                              num_results=num_results),
+                    objects=objects)
 
     def _inst_to_dict(self, inst):
         """Returns the dictionary representation of the specified instance.
@@ -1089,7 +1090,8 @@ class API(ModelView):
             #
             # TODO We are already calling self._compute_results_per_page() once
             # in _paginated(); don't compute it again here.
-            page, last_page = result['page'], result['total_pages']
+            page = result['meta']['page']
+            last_page = result['meta']['total_pages']
             linkstring = create_link_string(page, last_page,
                                             self._compute_results_per_page())
             headers = dict(Link=linkstring)
