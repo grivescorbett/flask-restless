@@ -1287,7 +1287,7 @@ class API(ModelView):
             postprocessor(was_deleted=was_deleted)
         return {}, 204 if was_deleted else 404
 
-    def post(self):
+    def post(self, instid, relationname, relationinstid):
         """Creates a new instance of a given model based on request data.
 
         This function parses the string contained in
@@ -1307,6 +1307,9 @@ class API(ModelView):
         single level of relationship data.
 
         """
+        if instid is not None:
+            return self.patch(instid, relationname, relationinstid)
+            
         content_type = request.headers.get('Content-Type', None)
         content_is_json = content_type.startswith('application/json')
         is_msie = _is_msie8or9()

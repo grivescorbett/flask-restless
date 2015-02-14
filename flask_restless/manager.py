@@ -542,7 +542,7 @@ class APIManager(object):
         # sets of methods used for different types of endpoints
         no_instance_methods = methods & frozenset(('POST', ))
         instance_methods = \
-            methods & frozenset(('GET', 'PATCH', 'DELETE', 'PUT'))
+            methods & frozenset(('GET', 'PATCH', 'DELETE', 'PUT', 'POST'))
         possibly_empty_instance_methods = methods & frozenset(('GET', ))
         if allow_patch_many and ('PATCH' in methods or 'PUT' in methods):
             possibly_empty_instance_methods |= frozenset(('PATCH', 'PUT'))
